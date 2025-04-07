@@ -48,21 +48,21 @@ void create_symlink(const char *hunt_id) {
     symlink(target_path, link_name);
 }
 
-// ===== COMENZI =====
+// ===== ENGINE =====
 
 void add_treasure(const char *hunt_id) {
     Treasure t;
 
-    // Prompt for Treasure ID
+    
     printf("Treasure ID: ");
     char input[32];
     if (fgets(input, sizeof(input), stdin) == NULL) {
         printf("Invalid input for Treasure ID.\n");
         return;
     }
-    t.treasure_id = strtol(input, NULL, 10);  // Convert string to integer
+    t.treasure_id = strtol(input, NULL, 10);  
 
-    // Prompt for Username
+    
     printf("Username: ");
     if (fgets(t.username, sizeof(t.username), stdin) == NULL) {
         printf("Invalid input for Username.\n");
@@ -123,7 +123,7 @@ void add_treasure(const char *hunt_id) {
         perror("Failed to write treasure data");
     }
 
-    // Close the file
+    
     close(fd);
 
     // Log the action
