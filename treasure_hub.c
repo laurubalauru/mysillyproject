@@ -9,12 +9,51 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-
 char cmd_file_path[] = "monitor_command.txt";
 pid_t monitor_pid = -1;
 int monitor_running = 0;
 int monitor_terminating = 0;
+int pipe_fd[2]; // Pipe for communication with monitor
+void calculate_scores() {
+    DIR *dir = opendir(".");
+    if (!dir) {
+        perror("Could not open current directory");
+        return;
+    }
 
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "hunt", 4) == 0) {
+            printf("Calculating scores for %s...\n", entry->d_name);
+            fflush(stdout);
+            
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl("./calculate_score", "calculate_score", entry->d_name, NULL);
+                perror("execl failed");
+                exit(EXIT_FAILURE);
+            } else if (pid < 0) {
+                perror("Failed to fork");
+            } else {
+                int status;
+                waitpid(pid, &status, 0);
+                
+                if (WIFEXITED(status)) {
+                    if (WEXITSTATUS(status) != 0) {
+                        printf("Score calculation failed for %s\n", entry->d_name);
+                    }
+                }
+            }
+        }
+    }
+    closedir(dir);
+    printf("Score calculation complete for all hunts.\n");
+    
+    // Clear any remaining input in the buffer
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF) { /* discard */ }
+}
+// === List all hunts ===
 void list_all_hunts() {
     DIR *dir = opendir(".");
     if (!dir) {
@@ -27,20 +66,16 @@ void list_all_hunts() {
     printf("Available hunts:\n");
 
     while ((entry = readdir(dir)) != NULL) {
-        // Verificăm dacă numele începe cu "hunt"
         if (strncmp(entry->d_name, "hunt", 4) == 0) {
-            // Obținem informații despre fișier folosind stat
             if (stat(entry->d_name, &st) == 0 && S_ISDIR(st.st_mode)) {
                 printf("- %s\n", entry->d_name);
             }
         }
     }
-
     closedir(dir);
 }
 
-
-// === Functii pentru monitor ===
+// === Monitor signal handlers ===
 void handle_sigusr1(int sig) {
     FILE *f = fopen(cmd_file_path, "r");
     if (!f) {
@@ -53,17 +88,36 @@ void handle_sigusr1(int sig) {
         char *cmd = strtok(line, " \n");
 
         if (strcmp(cmd, "list_hunts") == 0) {
-            printf("Listing hunts...\n");
-            list_all_hunts();
+            // Send through pipe instead of direct printing
+            char response[512] = "Available hunts:\n";
+            DIR *dir = opendir(".");
+            if (dir) {
+                struct dirent *entry;
+                while ((entry = readdir(dir)) != NULL) {
+                    if (strncmp(entry->d_name, "hunt", 4) == 0) {
+                        strcat(response, "- ");
+                        strcat(response, entry->d_name);
+                        strcat(response, "\n");
+                    }
+                }
+                closedir(dir);
+            }
+            write(pipe_fd[1], response, strlen(response) + 1);
 
         } else if (strcmp(cmd, "list_treasures") == 0) {
             char *hunt_id = strtok(NULL, " \n");
             if (hunt_id) {
                 char path[256];
                 snprintf(path, sizeof(path), "./treasure_manager --list %s", hunt_id);
-                system(path);
-            } else {
-                printf("Error: Missing hunt_id for list_treasures\n");
+                
+                // Open a pipe to capture output
+                FILE *fp = popen(path, "r");
+                if (fp) {
+                    char buffer[1024];
+                    size_t bytes_read = fread(buffer, 1, sizeof(buffer), fp);
+                    write(pipe_fd[1], buffer, bytes_read);
+                    pclose(fp);
+                }
             }
 
         } else if (strcmp(cmd, "view_treasure") == 0) {
@@ -72,21 +126,24 @@ void handle_sigusr1(int sig) {
             if (hunt_id && id) {
                 char path[256];
                 snprintf(path, sizeof(path), "./treasure_manager --view %s %s", hunt_id, id);
-                system(path);
-            } else {
-                printf("Error: Missing parameters for view_treasure\n");
+                
+                FILE *fp = popen(path, "r");
+                if (fp) {
+                    char buffer[1024];
+                    size_t bytes_read = fread(buffer, 1, sizeof(buffer), fp);
+                    write(pipe_fd[1], buffer, bytes_read);
+                    pclose(fp);
+                }
             }
-        } else {
-            printf("Unknown command in monitor.\n");
         }
     }
-
     fclose(f);
 }
 
 void handle_sigusr2(int sig) {
     printf("Stopping monitor after delay...\n");
     usleep(2000000); // 2 sec delay
+    close(pipe_fd[1]); // Close pipe before exit
     exit(0);
 }
 
@@ -99,10 +156,16 @@ void sigchld_handler(int sig) {
     printf("Monitor terminated.\n");
 }
 
-// === Porneste monitorul ===
+// === Start monitor process ===
 void start_monitor() {
     if (monitor_running) {
         printf("Monitor already running.\n");
+        return;
+    }
+
+    // Create pipe before forking
+    if (pipe(pipe_fd) == -1) {
+        perror("pipe");
         return;
     }
 
@@ -112,7 +175,9 @@ void start_monitor() {
         return;
     }
 
-    if (monitor_pid == 0) {
+    if (monitor_pid == 0) { // Monitor process
+        close(pipe_fd[0]); // Close read end in monitor
+
         struct sigaction sa_usr1, sa_usr2;
         memset(&sa_usr1, 0, sizeof(sa_usr1));
         memset(&sa_usr2, 0, sizeof(sa_usr2));
@@ -123,8 +188,11 @@ void start_monitor() {
         sigaction(SIGUSR1, &sa_usr1, NULL);
         sigaction(SIGUSR2, &sa_usr2, NULL);
 
-        while (1) pause(); // asteapta semnale
-    } else {
+        while (1) pause(); // Wait for signals
+
+    } else { // Parent process
+        close(pipe_fd[1]); // Close write end in parent
+
         struct sigaction sa_chld;
         memset(&sa_chld, 0, sizeof(sa_chld));
         sa_chld.sa_handler = sigchld_handler;
@@ -136,7 +204,7 @@ void start_monitor() {
     }
 }
 
-// === Trimite comanda catre monitor ===
+// === Send command to monitor ===
 void send_command(const char *command) {
     if (!monitor_running) {
         printf("Error: Monitor not running.\n");
@@ -157,9 +225,16 @@ void send_command(const char *command) {
     fclose(f);
 
     kill(monitor_pid, SIGUSR1);
+
+    // Read response from pipe
+    char buffer[1024];
+    ssize_t bytes_read = read(pipe_fd[0], buffer, sizeof(buffer));
+    if (bytes_read > 0) {
+        printf("%.*s", (int)bytes_read, buffer);
+    }
 }
 
-// === Opreste monitorul ===
+// === Stop monitor ===
 void stop_monitor() {
     if (!monitor_running) {
         printf("Monitor is not running.\n");
@@ -171,7 +246,7 @@ void stop_monitor() {
     monitor_terminating = 1;
 }
 
-// === Bucla principala ===
+// === Main command loop ===
 void listen() {
     char line[256];
     while (1) {
@@ -198,17 +273,13 @@ void listen() {
             }
         } else if (strcmp(cmd, "list_hunts") == 0) {
             send_command("list_hunts");
-
         } else if (strcmp(cmd, "list_treasures") == 0) {
             char *hunt_id = strtok(NULL, " ");
             if (hunt_id) {
                 char buffer[256];
                 snprintf(buffer, sizeof(buffer), "list_treasures %s", hunt_id);
                 send_command(buffer);
-            } else {
-                printf("Usage: list_treasures <hunt_id>\n");
             }
-
         } else if (strcmp(cmd, "view_treasure") == 0) {
             char *hunt_id = strtok(NULL, " ");
             char *id = strtok(NULL, " ");
@@ -216,12 +287,11 @@ void listen() {
                 char buffer[256];
                 snprintf(buffer, sizeof(buffer), "view_treasure %s %s", hunt_id, id);
                 send_command(buffer);
-            } else {
-                printf("Usage: view_treasure <hunt_id> <id>\n");
             }
-
+        } else if (strcmp(cmd, "calculate_score") == 0) {
+            calculate_scores();
         } else {
-            printf("Unknown command. Available: start_monitor, stop_monitor, list_hunts, list_treasures <hunt_id>, view_treasure <hunt_id> <id>, exit\n");
+            printf("Unknown command. Available: start_monitor, stop_monitor, list_hunts, list_treasures <hunt_id>, view_treasure <hunt_id> <id>, calculate_score, exit\n");
         }
     }
 }
