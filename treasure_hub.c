@@ -13,11 +13,18 @@ char cmd_file_path[] = "monitor_command.txt";
 pid_t monitor_pid = -1;
 int monitor_running = 0;
 int monitor_terminating = 0;
-int pipe_fd[2]; // Pipe for communication with monitor
+int pipe_fd[2]; // Pipe folosit pentru comunicare intre procesul principal si monitor
+
+// Functie pentru calcularea scorurilor
 void calculate_scores() {
+    if (!monitor_running || monitor_terminating) {
+        printf("Err: monitor not running :(\n");
+        return;
+    }
+
     DIR *dir = opendir(".");
     if (!dir) {
-        perror("Could not open current directory");
+        perror("Could not open current dir");
         return;
     }
 
@@ -26,38 +33,58 @@ void calculate_scores() {
         if (strncmp(entry->d_name, "hunt", 4) == 0) {
             printf("Calculating scores for %s...\n", entry->d_name);
             fflush(stdout);
-            
-            pid_t pid = fork();
+
+            int fds[2];
+            if (pipe(fds) == -1) {
+                // Creeaza un pipe pentru comunicare intre procesul parinte si copil
+                perror("pipe failed");
+                continue;
+            }
+
+            pid_t pid = fork(); // Creaza un nou proces
             if (pid == 0) {
+                // Procesul copil
+                close(fds[0]); // Inchide capatul de citire al pipe-ului
+                dup2(fds[1], STDOUT_FILENO); // Redirecteaza stdout catre pipe
+                close(fds[1]); // Inchide capatul de scriere, deoarece este duplicat
+
+                // Inlocuieste procesul cu programul calculate_score
                 execl("./calculate_score", "calculate_score", entry->d_name, NULL);
                 perror("execl failed");
                 exit(EXIT_FAILURE);
-            } else if (pid < 0) {
-                perror("Failed to fork");
-            } else {
-                int status;
-                waitpid(pid, &status, 0);
-                
-                if (WIFEXITED(status)) {
-                    if (WEXITSTATUS(status) != 0) {
-                        printf("Score calculation failed for %s\n", entry->d_name);
-                    }
+            } else if (pid > 0) {
+                // Procesul parinte
+                close(fds[1]); // Inchide capatul de scriere
+
+                char buffer[1024];
+                ssize_t count;
+                // Citeste rezultatul produs de copil prin pipe
+                while ((count = read(fds[0], buffer, sizeof(buffer) - 1)) > 0) {
+                    buffer[count] = '\0';
+                    printf("%s", buffer);
                 }
+                close(fds[0]); // Inchide capatul de citire
+
+                int status;
+                waitpid(pid, &status, 0); // Asteapta terminarea copilului
+                if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                    printf("Score calculation failed for %s\n", entry->d_name);
+                }
+            } else {
+                perror("fork failed"); // Fork a esuat
             }
         }
     }
+
     closedir(dir);
     printf("Score calculation complete for all hunts.\n");
-    
-    // Clear any remaining input in the buffer
-    int c;
-    while ((c = getchar()) != '\n' && c != EOF) { /* discard */ }
 }
-// === List all hunts ===
+
+// Functie pentru listarea tuturor vanatorilor
 void list_all_hunts() {
     DIR *dir = opendir(".");
     if (!dir) {
-        perror("Could not open current directory");
+        perror("Could not open current dir");
         return;
     }
 
@@ -75,7 +102,7 @@ void list_all_hunts() {
     closedir(dir);
 }
 
-// === Monitor signal handlers ===
+// Handler pentru semnalul SIGUSR1 - proceseaza comanda din fisier
 void handle_sigusr1(int sig) {
     FILE *f = fopen(cmd_file_path, "r");
     if (!f) {
@@ -88,7 +115,6 @@ void handle_sigusr1(int sig) {
         char *cmd = strtok(line, " \n");
 
         if (strcmp(cmd, "list_hunts") == 0) {
-            // Send through pipe instead of direct printing
             char response[512] = "Available hunts:\n";
             DIR *dir = opendir(".");
             if (dir) {
@@ -102,31 +128,32 @@ void handle_sigusr1(int sig) {
                 }
                 closedir(dir);
             }
-            write(pipe_fd[1], response, strlen(response) + 1);
+            write(pipe_fd[1], response, strlen(response) + 1); // Scrie rezultatul in pipe
+        }
 
-        } else if (strcmp(cmd, "list_treasures") == 0) {
+        else if (strcmp(cmd, "list_treasures") == 0) {
             char *hunt_id = strtok(NULL, " \n");
             if (hunt_id) {
                 char path[256];
                 snprintf(path, sizeof(path), "./treasure_manager --list %s", hunt_id);
-                
-                // Open a pipe to capture output
-                FILE *fp = popen(path, "r");
+
+                FILE *fp = popen(path, "r"); // Deschide un proces pentru a rula comanda
                 if (fp) {
                     char buffer[1024];
                     size_t bytes_read = fread(buffer, 1, sizeof(buffer), fp);
-                    write(pipe_fd[1], buffer, bytes_read);
+                    write(pipe_fd[1], buffer, bytes_read); // Trimite rezultatul prin pipe
                     pclose(fp);
                 }
             }
+        }
 
-        } else if (strcmp(cmd, "view_treasure") == 0) {
+        else if (strcmp(cmd, "view_treasure") == 0) {
             char *hunt_id = strtok(NULL, " \n");
             char *id = strtok(NULL, " \n");
             if (hunt_id && id) {
                 char path[256];
                 snprintf(path, sizeof(path), "./treasure_manager --view %s %s", hunt_id, id);
-                
+
                 FILE *fp = popen(path, "r");
                 if (fp) {
                     char buffer[1024];
@@ -140,13 +167,15 @@ void handle_sigusr1(int sig) {
     fclose(f);
 }
 
+// Handler pentru semnalul SIGUSR2 - opreste monitorul cu o intarziere
 void handle_sigusr2(int sig) {
     printf("Stopping monitor after delay...\n");
-    usleep(2000000); // 2 sec delay
-    close(pipe_fd[1]); // Close pipe before exit
-    exit(0);
+    usleep(2000000); // Intarziere 2 secunde
+    close(pipe_fd[1]); // Inchide capatul de scriere al pipe-ului
+    exit(0); // Termina procesul monitor
 }
 
+// Handler pentru SIGCHLD - detecteaza terminarea monitorului
 void sigchld_handler(int sig) {
     int status;
     waitpid(monitor_pid, &status, 0);
@@ -156,27 +185,27 @@ void sigchld_handler(int sig) {
     printf("Monitor terminated.\n");
 }
 
-// === Start monitor process ===
+// Porneste procesul de monitorizare
 void start_monitor() {
     if (monitor_running) {
         printf("Monitor already running.\n");
         return;
     }
 
-    // Create pipe before forking
     if (pipe(pipe_fd) == -1) {
         perror("pipe");
         return;
     }
 
-    monitor_pid = fork();
+    monitor_pid = fork(); // Creeaza procesul monitor
     if (monitor_pid < 0) {
         perror("Failed to fork monitor");
         return;
     }
 
-    if (monitor_pid == 0) { // Monitor process
-        close(pipe_fd[0]); // Close read end in monitor
+    if (monitor_pid == 0) {
+        // Procesul monitor
+        close(pipe_fd[0]); // Inchide capatul de citire (doar scrie)
 
         struct sigaction sa_usr1, sa_usr2;
         memset(&sa_usr1, 0, sizeof(sa_usr1));
@@ -185,18 +214,18 @@ void start_monitor() {
         sa_usr1.sa_handler = handle_sigusr1;
         sa_usr2.sa_handler = handle_sigusr2;
 
-        sigaction(SIGUSR1, &sa_usr1, NULL);
-        sigaction(SIGUSR2, &sa_usr2, NULL);
+        sigaction(SIGUSR1, &sa_usr1, NULL); // Asociaza handler pentru SIGUSR1
+        sigaction(SIGUSR2, &sa_usr2, NULL); // Asociaza handler pentru SIGUSR2
 
-        while (1) pause(); // Wait for signals
-
-    } else { // Parent process
-        close(pipe_fd[1]); // Close write end in parent
+        while (1) pause(); // Asteapta semnale
+    } else {
+        // Procesul parinte
+        close(pipe_fd[1]); // Inchide capatul de scriere
 
         struct sigaction sa_chld;
         memset(&sa_chld, 0, sizeof(sa_chld));
         sa_chld.sa_handler = sigchld_handler;
-        sigaction(SIGCHLD, &sa_chld, NULL);
+        sigaction(SIGCHLD, &sa_chld, NULL); // Asteapta terminarea monitorului
 
         monitor_running = 1;
         monitor_terminating = 0;
@@ -204,7 +233,7 @@ void start_monitor() {
     }
 }
 
-// === Send command to monitor ===
+// Trimite o comanda catre monitor
 void send_command(const char *command) {
     if (!monitor_running) {
         printf("Error: Monitor not running.\n");
@@ -221,20 +250,19 @@ void send_command(const char *command) {
         return;
     }
 
-    fprintf(f, "%s\n", command);
+    fprintf(f, "%s\n", command); // Scrie comanda in fisier
     fclose(f);
 
-    kill(monitor_pid, SIGUSR1);
+    kill(monitor_pid, SIGUSR1); // Trimite semnal catre monitor pentru a procesa comanda
 
-    // Read response from pipe
     char buffer[1024];
-    ssize_t bytes_read = read(pipe_fd[0], buffer, sizeof(buffer));
+    ssize_t bytes_read = read(pipe_fd[0], buffer, sizeof(buffer)); // Citeste raspunsul din pipe
     if (bytes_read > 0) {
         printf("%.*s", (int)bytes_read, buffer);
     }
 }
 
-// === Stop monitor ===
+// Opreste procesul monitor
 void stop_monitor() {
     if (!monitor_running) {
         printf("Monitor is not running.\n");
@@ -242,11 +270,11 @@ void stop_monitor() {
     }
 
     printf("Stopping monitor (PID %d)...\n", monitor_pid);
-    kill(monitor_pid, SIGUSR2);
+    kill(monitor_pid, SIGUSR2); // Trimite semnal SIGUSR2 pentru oprire
     monitor_terminating = 1;
 }
 
-// === Main command loop ===
+// Bucla principala de comenzi
 void listen() {
     char line[256];
     while (1) {

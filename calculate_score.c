@@ -28,6 +28,8 @@ void calculate_scores_for_hunt(const char *hunt_id) {
     snprintf(data_path, sizeof(data_path), "%s/treasures.dat", hunt_id);
     
     int fd = open(data_path, O_RDONLY);
+    // Deschide fisierul binar pentru citire folosind apelul de sistem open 
+
     if (fd < 0) {
         perror("Cannot open treasure file");
         return;
@@ -38,6 +40,7 @@ void calculate_scores_for_hunt(const char *hunt_id) {
 
     Treasure t;
     while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
+        // Citeste structuri Treasure direct din fisier folosind read 
         int found = 0;
         for (int i = 0; i < num_users; i++) {
             if (strcmp(scores[i].username, t.username) == 0) {
@@ -53,7 +56,7 @@ void calculate_scores_for_hunt(const char *hunt_id) {
             num_users++;
         }
     }
-    close(fd);
+    close(fd); // Inchide fisierul deschis cu open()
 
     printf("Scores for hunt %s:\n", hunt_id);
     for (int i = 0; i < num_users; i++) {

@@ -201,7 +201,7 @@ void remove_hunt(const char *hunt_id) {
     printf("Hunt %s deleted.\n", hunt_id);
 }
 
-// ===== Command Help and Main =====
+
 
 void print_help() {
     printf("Usage:\n");
