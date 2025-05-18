@@ -210,8 +210,6 @@ void print_help() {
     printf("  --view <hunt_id> <treasure_id>\n");
     printf("  --remove_treasure <hunt_id> <treasure_id>\n");
     printf("  --remove_hunt <hunt_id>\n");
-    printf("  --help\n");
-    printf("  --kill\n");
 }
 
 int main(int argc, char *argv[]) {
